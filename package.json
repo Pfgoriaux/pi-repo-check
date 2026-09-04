@@ -1,0 +1,21 @@
+{
+  "name": "pi-repo-check",
+  "version": "0.1.0",
+  "description": "repo_check tool + /repo-check command for pi \u2014 runs a repo hygiene gate (conventions.json rules, docs-in-pairs, AGENTS.md command resolution, baseline). Thin wrapper around a single canonical check-repo.mjs runner; point at any compatible script with REPO_CHECK_SCRIPT.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pfgoriaux/pi-repo-check.git"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/repo-check.ts"
+    ]
+  },
+  "dependencies": {
+    "typebox": "^1.3.7"
+  }
+}
