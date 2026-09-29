@@ -1,62 +1,69 @@
 # pi-repo-check
 
-A [pi](https://pi.dev) package exposing a repo hygiene gate as a
-callable tool: `repo_check` for agents, `/repo-check` for humans.
+A [pi](https://pi.dev) package exposing a repository hygiene runner:
+`repo_check` for agents and `/repo-check` for humans. It runs the external script
+against the session's working directory and reports the result without modifying
+the repository.
 
-```
-agent/human → repo_check tool → node <candidate path>/scripts/check-repo.mjs --json
-                                          ↑ canonical, zero-dep, single source of truth
-CI · git hooks · npm run check call the same script directly.
-```
+## Checks
 
-## What it checks (read-only)
+With the workspace's compatible `check-repo.mjs` runner:
 
-1. `conventions.json` rules — file-size bounds, naming, required siblings,
-   content regexes. `severity: "error"` rows fail; `"warning"` rows advise.
-2. **docs-in-pairs** — every `AGENTS.md` needs a `README.md` sibling.
-3. **commands-resolve** — every command cited in `AGENTS.md` must resolve:
-   `npm/pnpm/bun/yarn run` scripts (nearest `package.json`, `--prefix`
-   aware), file paths (`node scripts/x.mjs`, `bash ./s.sh`), Makefile
-   targets. Dead commands in AGENTS.md burn agent turns — this catches them.
-4. **baseline** — LICENSE, a CI workflow, a lockfile next to `package.json`.
+- `conventions.json`: path, size, naming, sibling, and content rules. Rules with
+  severity `error` fail the check; `warning` rules are advisory.
+- Documentation pairing: warns when an `AGENTS.md` lacks a README sibling.
+- Cited commands: checks supported script and file-command patterns in AGENTS.md.
+  This is heuristic resolution, not execution or proof that every shell command works.
+- Baseline: warns about a missing license, GitHub workflow, or root package lockfile.
 
-First live run already caught real drift: linkedin-scraper's
-`db/AGENTS.md` cites `npm run migrate` which exists nowhere, and the repo
-has no CI workflow.
+The runner does not execute lint, typechecking, or behavior tests, and does not
+verify that a workflow runs them. Calling the tool is not equivalent to CI
+blocking a merge. Repos must wire their own checks into scripts, hooks, and CI.
 
-## Install
+## Install and configure
 
-1. `npm install` (typebox dep).
-2. Add to `~/.pi/agent/settings.json` `packages`:
-
-```json
-"../../dev/pi/extensions/pi-repo-check"
+```bash
+pi install git:github.com/Pfgoriaux/pi-repo-check
+# Or this workspace's local checkout:
+pi install /Users/pf/eden/tools/pi/extensions/pi-repo-check
 ```
 
-3. The runner script is resolved from a small list of candidate paths
-   (see `resolveScript()` in `extensions/repo-check.ts`), or set the
-   `REPO_CHECK_SCRIPT` env var to point at any compatible
-   `check-repo.mjs`.
+Local checkout development requires its dependencies (`npm install` from that
+repo). Reload or restart pi after installation.
 
-## Usage
+Runner resolution is exactly:
 
-- Agent-side: the `repo_check` tool ("verify repo structure / conventions",
-  or before claiming work done in a repo that has a `check` gate).
-- Human-side: `/repo-check` → summary notification.
+1. `REPO_CHECK_SCRIPT`, when set.
+2. Otherwise, `~/eden/tools/repo-template/scripts/check-repo.mjs`.
 
-To make a rule block (errors instead of warnings), edit `conventions.json`
-in the target repo — that is the only knob, shared by all four consumers
-(CI, hooks, `npm run check`, this tool).
+The default matches this workspace. To use another trusted runner:
 
+```bash
+export REPO_CHECK_SCRIPT=/absolute/path/to/check-repo.mjs
+pi
+```
 
-## The pi extension family
+On another machine, set the variable to a trusted compatible runner. It executes
+with your user's privileges. Setting it in an agent's child shell does not change
+the environment of an already-running pi process.
 
-Five packages, one workflow: plan, fan out, review, protect, verify.
+## Usage and scope
 
-| Package | Job |
-|---|---|
-| [pi-dispatch](https://github.com/Pfgoriaux/pi-dispatch) | parallel sub-agent fan-out, merge-back, Herdr arborescence |
-| [pi-feature-swarm](https://github.com/Pfgoriaux/pi-feature-swarm) | read-only multi-model feature discovery & planning |
-| [pi-pr-swarm](https://github.com/Pfgoriaux/pi-pr-swarm) | multi-model PR review, then aggregate & fix |
-| [pi-worktree-guard](https://github.com/Pfgoriaux/pi-worktree-guard) | one branch = one worktree = one agent |
-| [pi-repo-check](https://github.com/Pfgoriaux/pi-repo-check) | repo hygiene gate: conventions, docs-in-pairs, baseline |
+- Ask pi to run `repo_check`, or use `/repo-check` for a summary notification.
+- Run it from the repository being checked. `eden/` itself is a workspace, not an
+  application repo; generic root license/CI/package checks do not establish its health.
+- A missing runner produces an error. Warnings remain warnings; `conventions.json`
+  severity applies to structural rules, not to every hardcoded baseline check.
+- For direct checks, the runner accepts a target root:
+
+```bash
+node /Users/pf/eden/tools/repo-template/scripts/check-repo.mjs /path/to/repo --json
+```
+
+## Related packages
+
+[pi-dispatch](https://github.com/Pfgoriaux/pi-dispatch) delegates work,
+[pi-feature-swarm](https://github.com/Pfgoriaux/pi-feature-swarm) plans features,
+[pi-pr-swarm](https://github.com/Pfgoriaux/pi-pr-swarm) reviews and optionally fixes,
+and [pi-worktree-guard](https://github.com/Pfgoriaux/pi-worktree-guard) guards
+selected conflicting Git operations. Each has separate permissions and limits.

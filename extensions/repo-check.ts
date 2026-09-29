@@ -18,7 +18,7 @@
  *
  * The canonical script path:
  *   1. `REPO_CHECK_SCRIPT` env var if set
- *   2. `~/eden/dev/repo-template/scripts/check-repo.mjs` (author's layout;
+ *   2. `~/eden/tools/repo-template/scripts/check-repo.mjs` (author's layout;
  *      override with the env var on your machine)
  *
  * It runs against the repo the session is in (process cwd).
@@ -53,7 +53,7 @@ interface RepoCheckResult {
 function resolveScript(): string {
 	return (
 		process.env.REPO_CHECK_SCRIPT ??
-		path.join(os.homedir(), "eden", "dev", "repo-template", "scripts", "check-repo.mjs")
+		path.join(os.homedir(), "eden", "tools", "repo-template", "scripts", "check-repo.mjs")
 	);
 }
 
