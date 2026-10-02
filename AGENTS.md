@@ -1,7 +1,5 @@
 # pi-repo-check
 
-Read and follow [shared working rules](RULES.MD).
-
 A pi tool exposing a read-only repository hygiene runner. It detects drift between
 instructions and repository structure; it does not run lint, typechecking, or
 behavior tests. Installation and runner setup: [README.md](README.md).
