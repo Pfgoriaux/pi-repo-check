@@ -12,7 +12,7 @@ behavior tests. Installation and runner setup: [README.md](README.md).
   The extension and direct CLI checks use the same bundled runner.
   Set `REPO_CHECK_SCRIPT` before starting pi to use a different trusted runner.
   A missing runner is an error, not a successful partial audit.
-- The compatible workspace runner treats baseline and command-resolution findings
+- The bundled runner treats baseline and command-resolution findings
   as warnings. Error-severity structural conventions can fail the check.
   Do not describe this wrapper as enforcing every documented rule.
 - Keep the runner read-only and its `--json` stdout parseable on both exit 0

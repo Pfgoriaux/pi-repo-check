@@ -1,50 +1,28 @@
-#!/usr/bin/env node
-/**
- * check-conventions.mjs — enforce the repo's `conventions.json` (the Layer B
- * format from the `repo-health` skill: see that skill's
- * `references/conventions-format.md` for the spec this implements).
- *
- * Zero dependencies, Node >= 20. Language- and stack-neutral: it checks
- * structure (file size, naming, required siblings, content regexes), which
- * linters don't own. Style still belongs to Biome/Ruff — not here.
- *
- * Usage:
- *   node scripts/check-conventions.mjs [root] [options]
- *
- *   root                  repo root (default: cwd), globs are relative to it
- *   --conventions <file> path to conventions.json (default: <root>/conventions.json)
- *   --files a,b,c         only check these repo-relative paths (for git hooks
- *                         and agent extensions that want to check touched files)
- *   --json                machine-readable output for the same consumers
- *
- * Exit codes: 0 = clean (warnings allowed), 1 = violations at severity "error",
- * 2 = config problem (missing/malformed file, unknown operator).
- *
- * Directories `.git` and `node_modules` are never walked; no convention can
- * target them. A rule that matches zero paths is a config warning (dead rule),
- * per the spec — errors fail, warnings advise.
- *
- * Consumers (one definition, four enforcement points):
- *   - `npm run check` / CI            block merges
- *   - git pre-commit / pre-push      block any committer, harness-agnostic
- *   - pi `turn_end` extension        feedback inside the agent loop
- *   - `repo-health` skill audits     periodic overview
- */
+/** Structural conventions used by the repository hygiene runner. */
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const SKIPPED_DIRS = new Set([".git", "node_modules"]);
-const OPERATORS = new Set([
-  "maxLines",
-  "contain",
-  "notContain",
-  "fileNameMatches",
-  "haveType",
-  "haveFiles",
-]);
+const strings = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
+const OPERATORS = {
+  maxLines: (value) => Number.isInteger(value) && value >= 0,
+  contain: strings,
+  notContain: strings,
+  fileNameMatches: (value) => typeof value === "string",
+  haveType: (value) => ["file", "directory"].includes(value),
+  haveFiles: strings,
+};
 
 export class ConfigError extends Error {}
+
+function validateRules(rules, label) {
+  if (rules === undefined) return;
+  if (!rules || typeof rules !== "object" || Array.isArray(rules)) throw new ConfigError(`${label}: expected an object`);
+  for (const [operator, value] of Object.entries(rules)) {
+    if (!Object.hasOwn(OPERATORS, operator)) throw new ConfigError(`${label}: unknown operator ${operator}`);
+    if (!OPERATORS[operator](value)) throw new ConfigError(`${label}: invalid value for ${operator}`);
+  }
+}
 
 /** `.git`-respecting walk: yields relative posix paths (files AND directories). */
 export function walk(root, { skip = SKIPPED_DIRS } = {}) {
@@ -123,6 +101,7 @@ export function loadConventions(root, file) {
   } catch (err) {
     throw new ConfigError(`${abs}: invalid JSON (${err.message})`);
   }
+  if (!parsed || typeof parsed !== "object") throw new ConfigError(`${abs}: expected an object`);
   if (parsed.version !== "v1") {
     throw new ConfigError(`${abs}: unsupported version ${JSON.stringify(parsed.version)} (want "v1")`);
   }
@@ -134,11 +113,10 @@ export function loadConventions(root, file) {
     if (!conv || typeof conv.name !== "string" || conv.name === "") {
       throw new ConfigError(`${label}: "name" is required`);
     }
-    if (!conv.paths) throw new ConfigError(`${label}: "paths" is required`);
-    const unknown = [...Object.keys(conv.must ?? {}), ...Object.keys(conv.mustNot ?? {})].filter(
-      (op) => !OPERATORS.has(op),
-    );
-    if (unknown.length > 0) throw new ConfigError(`${label}: unknown operator(s) ${unknown.join(", ")}`);
+    if (typeof conv.paths !== "string" && !strings(conv.paths)) throw new ConfigError(`${label}: "paths" must be a string or string array`);
+    if (conv.only != null && typeof conv.only !== "string" && !strings(conv.only)) throw new ConfigError(`${label}: invalid "only" scope`);
+    validateRules(conv.must, `${label}.must`);
+    validateRules(conv.mustNot, `${label}.mustNot`);
     if (conv.severity != null && !["error", "warning"].includes(conv.severity)) {
       throw new ConfigError(`${label}: severity must be "error" or "warning"`);
     }
@@ -172,6 +150,10 @@ function checkPath(conv, root, rel) {
 
   if (must.haveType != null && (isFile ? "file" : "directory") !== must.haveType) {
     fail(`is not ${must.haveType}`);
+  }
+  if (!isFile && !stats.isDirectory()) {
+    fail("not a regular file or directory");
+    return rows;
   }
 
   const filesToCheck = must.haveFiles ?? mustNot.haveFiles ?? [];
@@ -221,7 +203,7 @@ function checkPath(conv, root, rel) {
  * { rows, configWarnings, summary } — see the format spec for reporting
  * semantics; callers decide what to do with severities.
  */
-export function runCheck(root, { conventionsFile, files } = {}) {
+export function runCheck(root, { conventionsFile, files, paths } = {}) {
   const conventions = loadConventions(root, conventionsFile);
   if (conventions === null) {
     return {
@@ -236,7 +218,7 @@ export function runCheck(root, { conventionsFile, files } = {}) {
       },
     };
   }
-  const allPaths = walk(root);
+  const allPaths = paths ?? walk(root);
   const filter = files ? new Set(files.map((f) => f.replace(/^\.\//, ""))) : null;
   const onlyOf = (conv) => {
     const prefixes = conv.only == null ? [] : Array.isArray(conv.only) ? conv.only : [conv.only];
@@ -279,54 +261,3 @@ export function runCheck(root, { conventionsFile, files } = {}) {
     },
   };
 }
-
-function formatRow(row) {
-  const name = row.conv.name.padEnd(24).slice(0, 24);
-  return `${row.severity.toUpperCase().padEnd(7)} ${name} ${row.rel} — ${row.detail}`;
-}
-
-export function main(argv = process.argv.slice(2)) {
-  const opts = { files: null, conventionsFile: null, json: false };
-  const positional = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--files") opts.files = argv[++i]?.split(/[\n,]/).filter(Boolean) ?? null;
-    else if (a === "--conventions") opts.conventionsFile = argv[++i];
-    else if (a === "--json") opts.json = true;
-    else if (a === "--help" || a === "-h") {
-      process.stdout.write("Usage: check-conventions.mjs [root] [--conventions <file>] [--files a,b] [--json]\n");
-      return 0;
-    } else positional.push(a);
-  }
-  try {
-    const root = path.resolve(positional[0] ?? ".");
-    const result = runCheck(root, opts);
-    if (opts.json) {
-      process.stdout.write(`${JSON.stringify({ root, ...result }, null, 2)}\n`);
-    } else {
-      if (result.summary.noConventionsFile === true) {
-        process.stdout.write("No conventions.json found — nothing to check (add rules lazily when they pay for themselves).\n");
-        return 0;
-      }
-      for (const w of result.configWarnings) process.stdout.write(`config  WARNING ${w}\n`);
-      for (const row of result.rows) process.stdout.write(`${formatRow(row)}\n`);
-      const s = result.summary;
-      process.stdout.write(
-        `Checked ${s.checkedPaths} paths across ${s.conventions} conventions. Found ${s.errors} errors, ${s.warnings} warnings.\n`,
-      );
-    }
-    const s = result.summary;
-    if (s.errors > 0) {
-      if (!opts.json) process.stdout.write("Not convention-clean — fix the errors above or lower their severity in conventions.json.\n");
-      return 1;
-    }
-    return 0;
-  } catch (err) {
-    process.stderr.write(`config  ${err instanceof ConfigError ? "" : "internal "}${err.message}\n`);
-    return 2;
-  }
-}
-
-const invokedDirectly =
-  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedDirectly) process.exit(main());

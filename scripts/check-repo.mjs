@@ -1,30 +1,9 @@
 #!/usr/bin/env node
-/**
- * check-repo.mjs — repo hygiene gate: the executable slice of repo-health's
- * Layer A baseline + Layer B conventions.
- *
- * Composes:
- *   1. conventions.json rules (delegates to check-conventions.mjs)
- *   2. docs-in-pairs — AGENTS.md must have a README.md sibling (root and at
- *      every nested depth where an AGENTS.md exists)
- *   3. commands-resolve — every command cited in AGENTS.md must resolve:
- *      package.json scripts (npm/pnpm/bun/yarn run), file paths (node, tsx,
- *      bash, …), Makefile targets. AGENTS.md instructions that cite
- *      non-existent commands are worse than none — the agent tries them and
- *      burns turns.
- *   4. baseline — LICENSE, a CI workflow, a lockfile next to package.json
- *
- * Everything above is a warning except conventions you promoted to
- * severity "error". Deterministic feedback for agents and CI; the human-led
- * audit (repo-health skill) stays the place for judgment calls.
- *
- * Usage mirrors check-conventions.mjs:
- *   node scripts/check-repo.mjs [root] [--conventions <file>] [--files a,b] [--json]
- */
+/** Read-only repository hygiene CLI. Structural errors exit 1; configuration errors exit 2. */
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runCheck as runConventions, walk } from "./check-conventions.mjs";
+import { ConfigError, runCheck as runConventions, walk } from "./check-conventions.mjs";
 
 const PM_BUILTINS = new Set([
   "install", "ci", "test", "start", "stop", "restart", "publish", "update",
@@ -33,6 +12,37 @@ const PM_BUILTINS = new Set([
   "info", "search", "fund", "org", "help", "run-script",
 ]);
 const SCRIPT_PMS = /^(npm|pnpm|bun|yarn)$/;
+const BUN_BUILTINS = new Set(["build", "x", "create", "pm", "repl"]);
+const fileOperand = (value) => typeof value === "string" && (value.includes("/") || /\.[cm]?[jt]sx?$/.test(value));
+
+/** Resolve common make flags; leave unfamiliar option shapes unchecked. */
+function makeInvocation(tokens, cwd) {
+  let target;
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.startsWith("--directory=")) {
+      cwd = path.resolve(cwd, token.slice("--directory=".length));
+      continue;
+    }
+    if (token === "-C" || token === "--directory") {
+      if (!tokens[i + 1]) return null;
+      cwd = path.resolve(cwd, tokens[++i]);
+      continue;
+    }
+    if (token === "-j" || token === "--jobs") {
+      if (/^\d+$/.test(tokens[i + 1] ?? "")) i++;
+      continue;
+    }
+    if (["-I", "--include-dir", "-o", "--old-file", "-W", "--what-if"].includes(token)) {
+      if (!tokens[++i]) return null;
+      continue;
+    }
+    if (/^(?:-[snBrRkS]|-j\d+|--jobs=\d+|--silent|--dry-run)$/.test(token)) continue;
+    if (token.startsWith("-")) return null;
+    if (!token.includes("=")) target ??= token;
+  }
+  return target ? { cwd, target } : null;
+}
 
 /** Every AGENTS.md in the repo (walk already skips .git and node_modules). */
 export function findAgentsFiles(allPaths) {
@@ -69,11 +79,11 @@ function nearestPackage(dir, root) {
   let cur = dir;
   for (;;) {
     const p = path.join(cur, "package.json");
-    if (fs.existsSync(p)) {
+    if (isFile(p)) {
       try {
-        return JSON.parse(fs.readFileSync(p, "utf8")).scripts ?? {};
+        return { path: p, scripts: JSON.parse(fs.readFileSync(p, "utf8")).scripts ?? {} };
       } catch {
-        return {};
+        return { path: p, scripts: {} };
       }
     }
     if (cur === root || path.dirname(cur) === cur) return null;
@@ -83,11 +93,13 @@ function nearestPackage(dir, root) {
 
 /** Validate a cited command against the repo. Returns a problem string or null. */
 export function checkCommand(cmd, dir, root) {
-  const tokens = cmd.split(/\s+/);
+  const tokens = (cmd.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [])
+    .map((token) => token.replace(/^(['"])(.*)\1$/, "$2"));
   const [bin, first] = tokens;
+  if (bin === "bun" && BUN_BUILTINS.has(first)) return null;
 
   // package-manager script invocations, incl. `--prefix`-scoped ones
-  if (SCRIPT_PMS.test(bin)) {
+  if (SCRIPT_PMS.test(bin) && !(bin === "bun" && fileOperand(first))) {
     const prefixIdx = tokens.findIndex((t) => t === "--prefix" || t === "-C");
     const scopeDir =
       prefixIdx !== -1 && tokens[prefixIdx + 1]
@@ -100,9 +112,9 @@ export function checkCommand(cmd, dir, root) {
       !PM_BUILTINS.has(scriptName) &&
       !scriptName.includes(":\\") // not a path-ish token
     ) {
-      const scripts = nearestPackage(scopeDir, root);
-      if (scripts && !(scriptName in scripts)) {
-        return `no script "${scriptName}" in ${path.relative(root, nearestPackagePath(scopeDir, root))}`;
+      const pkg = nearestPackage(scopeDir, root);
+      if (pkg && !(scriptName in pkg.scripts)) {
+        return `no script "${scriptName}" in ${path.relative(root, pkg.path)}`;
       }
     }
     return null;
@@ -110,11 +122,12 @@ export function checkCommand(cmd, dir, root) {
 
   // runners with a path operand: node FILE, tsx FILE, bash FILE, node --test DIR
   if (/^(node|tsx|bun|bunx|npx|bash|sh|zsh|python3?|uv)$/.test(bin)) {
+    if (tokens.some((token) => ["-e", "--eval", "-p", "--print"].includes(token))) return null;
     const operand = tokens.slice(1).find((t) => !t.startsWith("-"));
     if (
       operand &&
       !operand.includes("*") && // shell glob — expanded at run time, not verifiable here
-      operand.includes("/") &&
+      fileOperand(operand) &&
       !/^https?:/.test(operand)
     ) {
       const resolved = operand.startsWith("/")
@@ -126,14 +139,16 @@ export function checkCommand(cmd, dir, root) {
   }
 
   if (bin === "make") {
-    const target = first?.split("=")[0];
-    if (!target) return null;
-    let cur = dir;
+    const invocation = makeInvocation(tokens, dir);
+    if (!invocation) return null;
+    const { target } = invocation;
+    let cur = invocation.cwd;
     for (;;) {
       const mk = path.join(cur, "Makefile");
-      if (fs.existsSync(mk)) {
+      if (isFile(mk)) {
         const body = fs.readFileSync(mk, "utf8");
-        return new RegExp(`^${target}\\s*:[^=]`, "m").test(body) || target === ".PHONY"
+        const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp(`^${escaped}\\s*:[^=]`, "m").test(body) || target === ".PHONY"
           ? null
           : `no "${target}" target in ${path.relative(root, mk)}`;
       }
@@ -149,27 +164,16 @@ export function checkCommand(cmd, dir, root) {
   return null;
 }
 
-function nearestPackagePath(dir, root) {
-  let cur = dir;
-  for (;;) {
-    const p = path.join(cur, "package.json");
-    if (fs.existsSync(p)) return p;
-    if (cur === root || path.dirname(cur) === cur) return p;
-    cur = path.dirname(cur);
-  }
-}
-
 /** docs-in-pairs + baseline checks. Returns rows: {check, rel, severity, detail}. */
 export function checkRepoBasics(root, allPaths) {
   const has = (p) => allPaths.includes(p);
-  const filesSet = new Set(allPaths.filter((p) => !p.endsWith(path.sep) && !isDir(root, p)));
+  const filesSet = new Set(allPaths.filter((p) => isFile(path.join(root, p))));
   const rows = [];
   const warn = (check, rel, detail) => rows.push({ check, rel, severity: "warning", detail });
 
   // docs-in-pairs: README.md (humans) + AGENTS.md (agents), everywhere AGENTS.md lives
-  for (const agents of allPaths
-    .filter((p) => p === "AGENTS.md" || p.endsWith("/AGENTS.md"))) {
-    const readme = path.join(path.dirname(agents), "README.md");
+  for (const agents of findAgentsFiles(allPaths)) {
+    const readme = path.posix.join(path.posix.dirname(agents), "README.md");
     if (!filesSet.has(readme)) warn("docs-in-pairs", agents, `no README.md sibling — docs come in pairs`);
   }
 
@@ -184,9 +188,9 @@ export function checkRepoBasics(root, allPaths) {
   return rows;
 }
 
-function isDir(root, rel) {
+function isFile(file) {
   try {
-    return fs.statSync(path.join(root, rel)).isDirectory();
+    return fs.statSync(file).isFile();
   } catch {
     return false;
   }
@@ -198,6 +202,10 @@ export function checkAgentsCommands(root, allPaths) {
   for (const agents of findAgentsFiles(allPaths)) {
     const abs = path.join(root, agents);
     const dir = path.dirname(abs);
+    if (!isFile(abs)) {
+      rows.push({ check: "commands-resolve", rel: agents, severity: "warning", detail: "AGENTS.md is not a regular file" });
+      continue;
+    }
     for (const cmd of extractCommands(fs.readFileSync(abs, "utf8"))) {
       const problem = checkCommand(cmd, dir, root);
       if (problem) rows.push({ check: "commands-resolve", rel: agents, severity: "warning", detail: `command "${cmd}" — ${problem}` });
@@ -208,7 +216,7 @@ export function checkAgentsCommands(root, allPaths) {
 
 export function runRepoCheck(root, { conventionsFile, files } = {}) {
   const allPaths = walk(root);
-  const conventions = runConventions(root, { conventionsFile, files });
+  const conventions = runConventions(root, { conventionsFile, files, paths: allPaths });
   const conventionRows = conventions.rows.map((r) => ({
     check: `convention:${r.conv.name}`,
     rel: r.rel,
@@ -263,11 +271,11 @@ export function main(argv = process.argv.slice(2)) {
     }
     return 0;
   } catch (err) {
-    process.stderr.write(`${err instanceof ReferenceError || err instanceof SyntaxError ? "internal" : "config"}  ${err.message}\n`);
+    process.stderr.write(`${err instanceof ConfigError ? "config" : "internal"}  ${err.message}\n`);
     return 2;
   }
 }
 
 const invokedDirectly =
   process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (invokedDirectly) process.exit(main());
+if (invokedDirectly) process.exitCode = main();

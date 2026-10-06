@@ -25,6 +25,7 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -49,8 +50,8 @@ interface RepoCheckResult {
 }
 
 function resolveScript(): string {
-	return (
-		process.env.REPO_CHECK_SCRIPT ??
+	return path.resolve(
+		process.env.REPO_CHECK_SCRIPT?.trim() ||
 		fileURLToPath(new URL("../scripts/check-repo.mjs", import.meta.url))
 	);
 }
@@ -62,12 +63,16 @@ export function runRepoCheck(cwd: string): RepoCheckResult | { error: string } {
 			error: `runner not found at ${script} — set REPO_CHECK_SCRIPT to a compatible check-repo.mjs`,
 		};
 	}
-	const proc = spawnSync(process.execPath, [script, "--json"], { encoding: "utf8", cwd, timeout: 30000 });
+	const proc = spawnSync(process.execPath, [script, "--json"], {
+		encoding: "utf8", cwd, timeout: 30000, maxBuffer: 16 * 1024 * 1024,
+	});
 	if (proc.error) {
-		return { error: `failed to run node: ${proc.error.message}` };
+		const reasons: Record<string, string> = { ETIMEDOUT: "runner exceeded 30 seconds", ENOBUFS: "runner output exceeded 16 MiB" };
+		return { error: reasons[(proc.error as NodeJS.ErrnoException).code ?? ""] ?? `failed to run node: ${proc.error.message}` };
 	}
 	if (proc.status === 2) {
-		return { error: `config problem: ${proc.stderr.trim() || proc.stdout.trim()}` };
+		const diagnostic = proc.stderr.trim() || proc.stdout.trim();
+		return { error: diagnostic.startsWith("internal") ? diagnostic : `config problem: ${diagnostic}` };
 	}
 	if (proc.status !== 0 && proc.status !== 1) {
 		return { error: `runner failed (${proc.signal ?? proc.status}): ${proc.stderr.trim()}` };
@@ -75,7 +80,7 @@ export function runRepoCheck(cwd: string): RepoCheckResult | { error: string } {
 	try {
 		return JSON.parse(proc.stdout) as RepoCheckResult;
 	} catch (err) {
-		return { error: `unparseable runner output: ${(err as Error).message}` };
+		return { error: `unparseable runner output (exit ${proc.status}): ${(err as Error).message}\n${proc.stderr.trim().slice(0, 4096)}` };
 	}
 }
 

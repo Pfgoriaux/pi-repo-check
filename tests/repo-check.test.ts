@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import extension, { runRepoCheck } from "../extensions/repo-check.ts";
 
@@ -38,12 +39,10 @@ test("error-severity conventions produce parseable JSON and exit 1", (t) => {
 	const result = runRepoCheck(root);
 	assert.ok(!("error" in result));
 	assert.equal(result.summary.errors, 1);
-	for (const file of ["check-repo.mjs", "check-conventions.mjs"]) {
-		const script = new URL(`../scripts/${file}`, import.meta.url);
-		const processResult = spawnSync(process.execPath, [script.pathname, "--json"], { cwd: root, encoding: "utf8" });
-		assert.equal(processResult.status, 1);
-		assert.equal(JSON.parse(processResult.stdout).summary.errors, 1);
-	}
+	const script = new URL("../scripts/check-repo.mjs", import.meta.url);
+	const processResult = spawnSync(process.execPath, [fileURLToPath(script), "--json"], { cwd: root, encoding: "utf8" });
+	assert.equal(processResult.status, 1);
+	assert.equal(JSON.parse(processResult.stdout).summary.errors, 1);
 });
 
 test("malformed config and broken override errors remain visible", (t) => {
@@ -58,6 +57,8 @@ test("malformed config and broken override errors remain visible", (t) => {
 	fs.writeFileSync(override, "process.stderr.write('override failed'); process.exit(7);");
 	process.env.REPO_CHECK_SCRIPT = override;
 	assert.match((runRepoCheck(root) as { error: string }).error, /runner failed \(7\): override failed/);
+	fs.writeFileSync(override, "throw new Error('runner crash');");
+	assert.match((runRepoCheck(root) as { error: string }).error, /exit 1.*\n.*runner crash/s);
 });
 
 test("tool and command use session cwd; missing runner rejects the tool call", async (t) => {
