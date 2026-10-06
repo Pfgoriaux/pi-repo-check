@@ -1,7 +1,12 @@
 {
   "name": "pi-repo-check",
+  "type": "module",
   "version": "0.1.0",
-  "description": "repo_check tool + /repo-check command for pi \u2014 runs a repo hygiene gate (conventions.json rules, docs-in-pairs, AGENTS.md command resolution, baseline). Thin wrapper around a single canonical check-repo.mjs runner; point at any compatible script with REPO_CHECK_SCRIPT.",
+  "description": "Read-only repo hygiene checks for pi, with a bundled runner and an optional REPO_CHECK_SCRIPT override.",
+  "scripts": {
+    "test": "node --test tests/*.test.ts",
+    "check": "npm test && node scripts/check-repo.mjs"
+  },
   "license": "MIT",
   "keywords": [
     "pi-package"
