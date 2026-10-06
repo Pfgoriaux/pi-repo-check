@@ -1,13 +1,13 @@
 # pi-repo-check
 
 A [pi](https://pi.dev) package exposing a repository hygiene runner:
-`repo_check` for agents and `/repo-check` for humans. It runs the external script
+`repo_check` for agents and `/repo-check` for humans. It runs the bundled script
 against the session's working directory and reports the result without modifying
 the repository.
 
 ## Checks
 
-With the workspace's compatible `check-repo.mjs` runner:
+The bundled `scripts/check-repo.mjs` runner checks:
 
 - `conventions.json`: path, size, naming, sibling, and content rules. Rules with
   severity `error` fail the check; `warning` rules are advisory.
@@ -34,16 +34,16 @@ repo). Reload or restart pi after installation.
 Runner resolution is exactly:
 
 1. `REPO_CHECK_SCRIPT`, when set.
-2. Otherwise, `~/eden/tools/repo-template/scripts/check-repo.mjs`.
+2. Otherwise, this package's `scripts/check-repo.mjs`.
 
-The default matches this workspace. To use another trusted runner:
+No workspace-specific path is required. To use another trusted runner:
 
 ```bash
 export REPO_CHECK_SCRIPT=/absolute/path/to/check-repo.mjs
 pi
 ```
 
-On another machine, set the variable to a trusted compatible runner. It executes
+An override must be a trusted compatible runner. It executes
 with your user's privileges. Setting it in an agent's child shell does not change
 the environment of an already-running pi process.
 
@@ -57,13 +57,12 @@ the environment of an already-running pi process.
 - For direct checks, the runner accepts a target root:
 
 ```bash
-node /Users/pf/eden/tools/repo-template/scripts/check-repo.mjs /path/to/repo --json
+node scripts/check-repo.mjs /path/to/repo --json
 ```
 
 ## Related packages
 
-[pi-dispatch](https://github.com/Pfgoriaux/pi-dispatch) delegates work,
-[pi-feature-swarm](https://github.com/Pfgoriaux/pi-feature-swarm) plans features,
-[pi-pr-swarm](https://github.com/Pfgoriaux/pi-pr-swarm) reviews and optionally fixes,
+[pi-dispatch](https://github.com/Pfgoriaux/pi-dispatch) delegates work, plans
+features, and reviews PRs,
 and [pi-worktree-guard](https://github.com/Pfgoriaux/pi-worktree-guard) guards
 selected conflicting Git operations. Each has separate permissions and limits.

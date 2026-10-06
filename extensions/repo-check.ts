@@ -16,18 +16,16 @@
  *     (package.json scripts, file paths, Makefile targets)
  *   - baseline: LICENSE, CI workflow, lockfile next to package.json
  *
- * The canonical script path:
+ * Runner resolution:
  *   1. `REPO_CHECK_SCRIPT` env var if set
- *   2. `~/eden/tools/repo-template/scripts/check-repo.mjs` (author's layout;
- *      override with the env var on your machine)
+ *   2. The scripts/check-repo.mjs bundled with this extension
  *
- * It runs against the repo the session is in (process cwd).
+ * It runs against the session's working directory.
  */
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -53,7 +51,7 @@ interface RepoCheckResult {
 function resolveScript(): string {
 	return (
 		process.env.REPO_CHECK_SCRIPT ??
-		path.join(os.homedir(), "eden", "tools", "repo-template", "scripts", "check-repo.mjs")
+		fileURLToPath(new URL("../scripts/check-repo.mjs", import.meta.url))
 	);
 }
 
@@ -64,12 +62,15 @@ export function runRepoCheck(cwd: string): RepoCheckResult | { error: string } {
 			error: `runner not found at ${script} — set REPO_CHECK_SCRIPT to a compatible check-repo.mjs`,
 		};
 	}
-	const proc = spawnSync("node", [script, "--json"], { encoding: "utf8", cwd });
+	const proc = spawnSync(process.execPath, [script, "--json"], { encoding: "utf8", cwd, timeout: 30000 });
 	if (proc.error) {
 		return { error: `failed to run node: ${proc.error.message}` };
 	}
 	if (proc.status === 2) {
-		return { error: `config problem: ${proc.stdout.trim()}` };
+		return { error: `config problem: ${proc.stderr.trim() || proc.stdout.trim()}` };
+	}
+	if (proc.status !== 0 && proc.status !== 1) {
+		return { error: `runner failed (${proc.signal ?? proc.status}): ${proc.stderr.trim()}` };
 	}
 	try {
 		return JSON.parse(proc.stdout) as RepoCheckResult;
@@ -105,10 +106,10 @@ export default function repoCheckExtension(pi: ExtensionAPI) {
 		description:
 			"Run the repo hygiene gate for this repository: conventions.json structural rules (file size, naming, required files), docs-in-pairs (AGENTS.md/README.md), AGENTS.md cited-command resolution, and baseline (LICENSE, CI, lockfile). Read-only. Use when asked to verify repo structure or conventions, or before claiming work is done in a repo that has one.",
 		parameters: Params,
-		async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
-			const result = runRepoCheck(process.cwd());
+		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+			const result = runRepoCheck(ctx.cwd);
 			if ("error" in result) {
-				return { content: [{ type: "text" as const, text: `repo_check failed: ${result.error}` }] };
+				throw new Error(`repo_check failed: ${result.error}`);
 			}
 			return {
 				content: [
@@ -117,6 +118,7 @@ export default function repoCheckExtension(pi: ExtensionAPI) {
 						text: `repo_check on ${result.root}\n\n${formatReport(result)}`,
 					},
 				],
+				details: result,
 			};
 		},
 	});
@@ -124,7 +126,7 @@ export default function repoCheckExtension(pi: ExtensionAPI) {
 	pi.registerCommand("repo-check", {
 		description: "Run the repo hygiene gate (conventions, docs-in-pairs, AGENTS.md command resolution)",
 		handler: async (_args, ctx) => {
-			const result = runRepoCheck(process.cwd());
+			const result = runRepoCheck(ctx.cwd);
 			if ("error" in result) {
 				ctx.ui.notify(result.error, "error");
 				return;
